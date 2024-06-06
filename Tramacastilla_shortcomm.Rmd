@@ -1,0 +1,1262 @@
+---
+title: "Tramacastilla sedaDNA analysis"
+author: "Irene Julián-Posada"
+date: "2024-05-16"
+output:
+  pdf_document: 
+    latex_engine: lualatex
+  html_document:
+    df_print: paged
+---
+This is the code used for sedimentary ancient DNA (sedaDNA) analysis of Tramacastilla Lake sequence, included in Julián-Posada et al. (2024).
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+packages <- c("usethis", "ggplot2", "tidyverse", "stringr", "forcats", "Bchron", "RRatepol", "vegan", "reshape2", "stats", "ggrepel", "patchwork", "devtools", "janitor", "labdsv", "ade4", "languageR", "rioja")
+new_packages <- packages[!(packages %in% installed.packages()[,"Package"])]
+if(length(new_packages)) install.packages(new_packages)
+
+lapply(packages, library, character.only = TRUE)
+
+load("E:/Saco/IJP/2_code/tramacastilla_sedaDNA/TRAM.RData") #import data
+```
+# 1. Tramacastilla ages and depths
+```{r}
+head(TRAM21_core_depth_original) #original dataset of Tramacastilla IDs and depths
+```
+Homogenise original depths and ages datasets according to sedaDNA dataset
+```{r}
+TRAM21_core_depth <- TRAM21_core_depth_original %>%
+  select(sample_id, composite.depth..cm.) %>%
+  rename("depth" = composite.depth..cm.) %>%
+  mutate(sample_id = str_replace_all(sample_id, "-", ".")) %>%
+  mutate(depth = as.integer(depth)) #truncate numbers, not round
+head(TRAM21_ages) #all Tramacastilla ages
+```
+Import sample ID of sedaDNA samples
+```{r}
+head(TRAM21_SampleID_DNA_original) #IDs of sedaDNA samples
+TRAM21_SampleID_DNA <- TRAM21_SampleID_DNA_original %>%
+  rename("sample_id" = sample)
+```
+We keep only depths and ages of sedaDNA samples
+```{r}
+TRAM21_age_depth <- TRAM21_ages %>%
+  left_join(TRAM21_core_depth, by = "depth") %>%
+  relocate(sample_id, .before = "depth") %>%
+  right_join(TRAM21_SampleID_DNA, by = "sample_id") %>%
+  rename("age" = "median") #we use the median for the age
+
+for (i in 2:ncol(TRAM21_age_depth)) TRAM21_age_depth[,i] <- as.numeric(TRAM21_age_depth[,i])
+depth <- as.numeric(TRAM21_age_depth$depth)
+age <- as.numeric(TRAM21_age_depth$age)      
+sample_id <- TRAM21_age_depth$sample_id
+```
+## 1.1. Obtain sedimentation rate
+```{r}
+TRAM21_age_depth %>%
+  ggplot(aes(x = age, y = depth)) +
+  geom_line() +
+  scale_y_reverse()
+```
+Calculate sedimentation rate (yrs/cm)
+```{r}
+TRAM21_age_depth_sed_rate <- TRAM21_age_depth %>%
+  mutate(depth_diff = c(NA, diff(depth)),
+         age_diff = c(NA, diff(age)),
+         sed_rate = age_diff/depth_diff)
+
+TRAM21_age_depth_sed_rate %>%
+  ggplot(aes(x = age, y = sed_rate)) +
+  geom_line() +
+  geom_point()
+
+#mean sedimentation rate
+(max(TRAM21_age_depth$age)-min(TRAM21_age_depth$age))/(max(TRAM21_age_depth$depth)-min(TRAM21_age_depth$depth))
+sd(TRAM21_age_depth_sed_rate[2:46,9])
+```
+# 2. Plant RAI
+```{r, eval = FALSE}
+head(TRAM21.plants) #original plant sedaDNA dataset
+taxa_names.plants <- TRAM21.plants$scientific_name #scientific names of taxa identified
+```
+## 2.1. Obtain dataframe with totread information
+```{r}
+TRAM21.plants_totread_no_blank <- TRAM21.plants %>%
+  select(starts_with("totread_sample.TRAM_1b_")) #dataframe with all totread information except controls
+renormalize.plants <- function(db){
+  total_reads.plants <- colSums(db)
+  for (i in 1:ncol(db)) db[,i] <- db[,i]/total_reads.plants[i]
+  return(db)
+}
+TRAM21.plants_totread_rel_no_blank <- TRAM21.plants_totread_no_blank %>%
+  renormalize.plants() #data renormalized
+```
+## 2.2. Obtain dataframe with weightrep information
+```{r}
+TRAM21.plants_weightrep_no_blank <- TRAM21.plants %>%
+  select(starts_with("weightrep_sample.TRAM_1b_")) %>% #dataframe with all weightrep information except controls
+  mutate(across(everything(), ~ifelse(. <= 0.125, 0, .))) %>% #discard samples with weightrep <= 0.125, that are considered unreplicated
+  mutate(across(everything(), as.numeric))
+```
+## 2.3. Calculate Relative Abundance Index (RAI): reads * weighted average proportion
+```{r}
+TRAM21.plants_RAI <- TRAM21.plants_totread_rel_no_blank*TRAM21.plants_weightrep_no_blank    #multiply values into a new dataframe
+colnames(TRAM21.plants_RAI) <- gsub(x = colnames(TRAM21.plants_RAI), pattern = "totread_sample.", replacement = "RAI_")
+TRAM21.plants_RAI_T <- t(TRAM21.plants_RAI) #transpose dataframe
+colnames(TRAM21.plants_RAI_T) <- taxa_names.plants #assign species names to columns
+temp_plants_RAI_perc <- TRAM21.plants_RAI_T/rowSums(TRAM21.plants_RAI_T) #compute percentage step1
+temp_plants_RAI_perc [is.na(temp_plants_RAI_perc)] <- 0 #compute percentage step2 (remove NAs derived from divided by 0)
+temp_plants_RAI_perc <- temp_plants_RAI_perc*100 #compute percentage step3
+temp_plants_RAI_perc_age <- cbind(age, temp_plants_RAI_perc)
+temp_plants_RAI_age <- cbind(depth, age, TRAM21.plants_RAI_T) #dataframe with RAI information for each taxa
+```
+## 2.4. Classification in plant groups
+Sum RAI values for all taxa within each group
+```{r}
+plant_groups <- (TRAM21.plants$group) #assign a name to classification variable
+Abies.alba <- colSums(TRAM21.plants_RAI[plant_groups=="Abies alba",])
+Pinus <- colSums(TRAM21.plants_RAI[plant_groups=="Pinus",])
+Decidious.tree <- colSums(TRAM21.plants_RAI[plant_groups=="Decidious tree",])
+Open.landscape <- colSums(TRAM21.plants_RAI[plant_groups=="Open landscape",])
+Novel.herbaceous.taxa <- colSums(TRAM21.plants_RAI[plant_groups=="Novel herbaceous taxa",])
+Herbs <- colSums(TRAM21.plants_RAI[plant_groups=="Herbs",])
+Shrub <- colSums(TRAM21.plants_RAI[plant_groups=="Shrub",])
+Other.tree <- colSums(TRAM21.plants_RAI[plant_groups=="Other tree",])
+Other.plant <- colSums(TRAM21.plants_RAI[plant_groups=="Other plant",])
+
+RAI_groups_plants <-cbind(Abies.alba, Pinus, Deciduous.tree, Open.landscape, Novel.herbaceous.taxa, Herbs, Shrub, Other.tree, Other.plant)
+colnames(RAI_groups_plants) <- c("Abies alba", "Pinus", "Deciduous tree", "Open landscape", "Novel herbaceous taxa", "Herbs", "Shrub", "Other tree", "Other plant") #correct names
+RAI_groups_plants_perc <-RAI_groups_plants/rowSums(RAI_groups_plants) * 100 #compute percentage
+RAI_groups_plants_perc <-cbind(age, depth, RAI_groups_plants_perc)
+for (i in 1:ncol(RAI_groups_plants_perc)) RAI_groups_plants_perc[,i] <- as.numeric(RAI_groups_plants_perc[,i])
+```
+## 2.5. RAI. long format and figure with percentages
+Long format of plant groups' RAI and figure
+```{r}
+long_RAI_plants.p<-RAI_groups_plants_perc %>%
+  bind_cols(rownames(RAI_groups_plants_perc), .) %>%
+  rename(sample = ...1) %>%
+  as_tibble() %>%
+  pivot_longer(cols = "Abies alba":"Other plant",
+               values_to = 'RAI_percentage',
+               names_to = 'group') %>%
+  full_join((TRAM21.plants %>%
+               dplyr::select(group))) %>%
+  summarize(sample = sample,
+            age = age,
+            depth = depth,
+            group = group,
+            RAI_percentage = RAI_percentage) %>%
+  distinct() %>%
+  na.omit()
+
+plant.palette <- c("#BFB2FF", "#422CB2", "#7EC3E5", "#FFD8B2","#6B990F","#C3E57E","#7E0018", "#E8E8E8", "#4F4F4F")
+long_RAI_plants.p %>%
+  mutate(group = fct_relevel(group, "Abies alba", "Pinus", "Deciduous tree", "Open landscape", "Novel herbaceous taxa", "Herbs", "Shrub", "Other tree", "Other plants"))  %>%
+  ggplot(aes(x=age/1000, y=round(RAI_percentage, 2) , group=group, fill=group))+
+  guides (fill = guide_legend(title = "Plant group")) +
+  xlab("Age (ka BP)") +
+  ylab("% RAI")+
+  theme_classic() +
+  theme (legend.position = "top")+
+  geom_col() + scale_x_reverse() + scale_fill_manual(values = plant.palette) +
+  geom_text(aes(x = age/1000, y = 105, label = age), inherit.aes = F, angle = 45, size = 3, check_overlap = T)
+```
+```{r}
+```
+# 3. Animal RAI
+```{r, eval = FALSE}
+head(TRAM21.animals) #original animal sedaDNA dataset without worms
+taxa_names.animals <- TRAM21.animals$final_assignment #scientific names of taxa identified
+```
+## 3.1. Obtain dataframe with totread information
+```{r}
+TRAM21.animals_totread_no_blank <- TRAM21.animals %>%
+  select(starts_with("totread_sample.TRAM_1b_")) #dataframe with all totread information except controls
+renormalize.animals <- function(db){
+  total_reads.animals <- colSums(db)
+  for (i in 1:ncol(db)) db[,i] <- db[,i]/total_reads.animals[i]
+  return(db)
+}
+TRAM21.animals_totread_rel_no_blank <- renormalize.animals(TRAM21.animals_totread_no_blank) #data renormalized
+TRAM21.animals_totread_rel_no_blank[is.na(TRAM21.animals_totread_rel_no_blank)] <- 0
+```
+## 3.2. Obtain dataframe with weightrep information
+```{r}
+TRAM21.animals_weightrep_no_blank <- TRAM21.animals %>%
+  select(starts_with("weightrep_sample.TRAM_1b_")) %>% #dataframe with all weightrep information except controls
+  mutate(across(everything(), ~ifelse(. <= 0.125, 0, .))) %>% #discard samples with weightrep <= 0.125, that are considered unreplicated
+  mutate(across(everything(), as.numeric))
+```
+## 3.3. Calculate Relative Abundance Index (RAI): reads * weighted average proportion
+```{r}
+TRAM21.animals_RAI <- TRAM21.animals_totread_rel_no_blank*TRAM21.animals_weightrep_no_blank
+colnames(TRAM21.animals_RAI) <- gsub(x = colnames(TRAM21.animals_RAI), pattern = "totread_sample.", replacement = "RAI_")
+TRAM21.animals_RAI_T <- t(TRAM21.animals_RAI)
+colnames(TRAM21.animals_RAI_T) <- taxa_names.animals
+temp_animals_RAI_perc <- TRAM21.animals_RAI_T/rowSums(TRAM21.animals_RAI_T) #compute percentage step1
+temp_animals_RAI_perc [is.na(temp_animals_RAI_perc)] <- 0 #compute percentage step2 (remove NAs derived from divided by 0)
+temp_animals_RAI_perc <- temp_animals_RAI_perc*100 #compute percentage step3
+temp_animals_RAI_perc_age <- cbind(age, temp_animals_RAI_perc)
+temp_animals_RAI_age <- cbind(age, TRAM21.animals_RAI_T)
+```
+## 3.4. Classification in animal groups
+Sum RAI values for all taxa within each group
+```{r}
+animal_groups <- (TRAM21.animals$group_v2)
+Bos.taurus <- colSums(TRAM21.animals_RAI[animal_groups=="Bos taurus",])
+Ovis.aries <- colSums(TRAM21.animals_RAI[animal_groups=="Ovis aries",])
+Capra.hircus <- colSums(TRAM21.animals_RAI[animal_groups=="Capra hircus",])
+Wild.animals <- colSums(TRAM21.animals_RAI[animal_groups=="Wild animal",])
+Wild.mammals <- colSums(TRAM21.animals_RAI[animal_groups=="Wild mammal",])
+Other.animals <- colSums(TRAM21.animals_RAI[animal_groups=="Other animals",])
+
+RAI_groups_animals <-cbind(Bos.taurus, Ovis.aries, Capra.hircus, Wild.animals, Wild.mammals, Other.animals)
+colnames(RAI_groups_animals)<-c("Cattle", "Sheep", "Goat", "Wild animal", "Wild mammal", "Other animals")    #correct names
+RAI_groups_animals_perc <-RAI_groups_animals/rowSums(RAI_groups_animals) * 100 #compute percentage
+RAI_groups_animals_perc[is.nan(RAI_groups_animals_perc)]<-0 #remove NaNs derived from computing /0 
+RAI_groups_animals_perc <-cbind(age, RAI_groups_animals_perc) 
+for (i in 1:ncol(RAI_groups_animals_perc)) RAI_groups_animals_perc[,i] <- as.numeric(RAI_groups_animals_perc[,i])
+```
+## 3.5. RAI. long format and figure with percentages
+Long format of animal groups' RAI and figure 
+```{r}
+long_RAI_animals.p<-RAI_groups_animals_perc %>%
+  bind_cols(rownames(RAI_groups_animals_perc), .) %>%
+  rename(sample = ...1) %>%
+  as_tibble() %>%
+  pivot_longer(cols = "Cattle":"Other animals",
+               values_to = 'RAI_percentage',
+               names_to = 'group') %>% 
+  full_join((TRAM21.animals %>%
+               dplyr::select(group))) %>%
+  summarize(sample = sample,
+            age = age,
+            group = group,
+            RAI_percentage = RAI_percentage) %>% 
+  distinct()
+
+animal.palette <- c("#E69F00", "#FFB2B2", "#B22C2C", "#C3E57E", "#6B990F", "#A8A8A8")
+long_RAI_animals.p %>%
+  mutate(group = fct_relevel(group, "Cattle", "Sheep", "Goat", "Wild animal", "Wild mammal", "Other animals")) %>%
+  ggplot(aes(x=age/1000, y=RAI_percentage, group=group, fill=group))+
+  guides (fill = guide_legend(title = "Animal group")) +
+  xlab("Age (ka BP)") +
+  ylab("% RAI")+
+  theme_classic() +
+  theme (legend.position = "top")+
+  geom_col() + scale_x_reverse() + scale_fill_manual(values = animal.palette) +
+  geom_text(aes(x = age/1000, y = 105, label = age), inherit.aes = F, angle = 45, size = 3, check_overlap = T)
+```
+```{r}
+```
+# 4. Richness
+## 4.1. Plant richness
+```{r}
+colnames(TRAM21.plants_RAI) <- sample_id
+richness.plants <- TRAM21.plants_RAI %>%
+  cbind(TRAM21.plants$family_name,
+        TRAM21.plants$genus_name,
+        TRAM21.plants$species_name,
+        TRAM21.plants$scientific_name) %>%
+  rename("family_name" = 'TRAM21.plants$family_name') %>%
+  rename("genus_name" = 'TRAM21.plants$genus_name') %>%
+  rename("species_name" = 'TRAM21.plants$species_name') %>%
+  rename("scientific_name" = 'TRAM21.plants$scientific_name') %>%
+  relocate("family_name":"scientific_name", .before = TRAM_1b_3U_11.12)
+```
+### 4.1.1 Plant taxonomic richness
+```{r}
+taxa.richness.plants <- richness.plants[,-c(1:4)]
+DNA_richness.plants <- colSums(taxa.richness.plants>0)
+DNA.df.plants <- data.frame(age, DNA_richness.plants)
+```
+## 4.2. Animal richness
+```{r}
+colnames(TRAM21.animals_RAI) <- sample_id
+richness.animals <- TRAM21.animals_RAI %>%
+  cbind(TRAM21.animals$EMBL_143_16s_family_name,
+        TRAM21.animals$EMBL_143_16s_genus_name,
+        TRAM21.animals$EMBL_143_16s_species_name,
+        TRAM21.animals$final_assignment) %>%
+  rename("family_name" = 'TRAM21.animals$EMBL_143_16s_family_name') %>%
+  rename("genus_name" = 'TRAM21.animals$EMBL_143_16s_genus_name') %>%
+  rename("species_name" = 'TRAM21.animals$EMBL_143_16s_species_name') %>%
+  rename("scientific_name" = 'TRAM21.animals$final_assignment') %>%
+  relocate("family_name":"scientific_name", .before = TRAM_1b_3U_11.12)
+```
+### 4.2.1 Animal taxonomic richness
+```{r}
+taxa.richness.animals <- richness.animals[,-c(1:4)]
+DNA_richness.animals <- colSums(taxa.richness.animals>0)
+DNA.df.animals <- data.frame(age, DNA_richness.animals)
+```
+## 4.3. Total taxonomic richness
+Richness of all plant and animal taxa identified
+```{r}
+Total.taxa.richness <- DNA_richness.animals + DNA_richness.plants
+DNA.richness <- cbind(age, DNA_richness.animals, DNA_richness.plants, Total.taxa.richness)
+DNA.richness <- as.data.frame(DNA.richness)
+ggplot(data = DNA.richness[c(1:25, 27:46),], aes(x = age/1000, y = Total.taxa.richness)) +
+  xlab ("Age (ka BP)") +
+  ylab ("Taxa richness") +
+  theme_classic() +
+  geom_point() + scale_x_reverse() + scale_y_continuous (breaks=seq(0, 250, 50)) +
+  geom_smooth(method = 'loess', color = "dark green") +
+  geom_point(data = DNA.richness[26,], aes(x= age/1000, y = Total.taxa.richness), col = "dark grey") #outlayer represented in grey
+```
+```{r}
+```
+# 5. Analysis of the Rate of Change
+## 5.1. Preparing data for RoC analysis: here i will have RAI values for each taxa, i will save these two data sets to clean them and see if taxa can be included in any other taxa
+```{r}
+TRAM21.plants_RAI_names <- cbind (TRAM21.plants$id, #plant data
+                                   TRAM21.plants$family_name, 
+                                   TRAM21.plants$genus_name,
+                                   TRAM21.plants$species_name,
+                                   taxa_names.plants,
+                                   TRAM21.plants$species_list_pyrenees,
+                                   TRAM21.plants_RAI)
+TRAM21.animals_RAI_names <- cbind(TRAM21.animals$id, #animal data
+                                   TRAM21.animals$EMBL_143_16s_family_name,
+                                   TRAM21.animals$EMBL_143_16s_genus_name,
+                                   TRAM21.animals$final_assignment,
+                                   TRAM21.animals$EMBL_143_16s_species_list,
+                                   TRAM21.animals_RAI)
+```
+## 5.2. Age uncertaintties from BChron age-depth model
+```{r}
+head(TRAM) #Bchron age-depth model
+TramChron <- with(TRAM, Bchronology(ages = ages,
+                                    ageSds = ageSds,
+                                    calCurves = calCurves,
+                                    positions = position,
+                                    positionThicknesses = thickness,
+                                    ids = id,
+                                    predictPositions = seq(0, 1500, by = 10)))
+plot(TramChron)
+age_position <- Bchron:::predict.BchronologyRun(object = TramChron, newPositions = TRAM21_age_depth$depth) #predict ages
+
+age_uncertainties <- age_position %>% #assign ages to each depth
+  as.data.frame() %>%
+  dplyr::mutate_all(., as.integer)
+colnames(age_uncertainties) <- TRAM21_age_depth$sample_id
+age_uncertainties <- as.matrix(age_uncertainties)
+```
+## 5.3. Import data
+```{r, eval = FALSE}
+age.RoC <- TRAM21_age_depth %>%
+  select(sample_id, age)
+age.RoC$age <- as.numeric(age.RoC$age)
+tram_level <- TRAM21_age_depth %>%
+  select(sample_id, depth)
+RAI.plants.new #plant dataset after grouping taxa within same taxonomic group (more in Methods)
+RAI.animals.new #animal dataset after grouping taxa within same taxonomic group (more in Methods)
+RAI.all.new <- cbind(RAI.plants.new, RAI.animals.new)
+for (i in 1:ncol(RAI.all.new)) RAI.all.new[,i] <- as.numeric(RAI.all.new[,i])
+RAI.all.new <- 1000*RAI.all.new #as 'n_individuals' has to be an integer, we multiply all by 1000
+RAI.all.new <- cbind(sample_id, RAI.all.new)
+RAI.all.new[is.na(RAI.all.new)]<-0
+```
+```{r}
+mean(unlist(RAI.all.new[,-1])) #median is 0, so take the mean value
+```
+## 5.4. Scenario 4 - Estimating RoC for each level subsampling data and calculating age uncertainties
+```{r}
+set_randomisations <- 10000
+scenario_4 <-
+  RRatepol::estimate_roc(
+    data_source_community = RAI.all.new,
+    data_source_age = age.RoC,
+    dissimilarity_coefficient = "chisq",
+    working_units = "levels",
+    time_standardisation = 500,
+    smooth_method = "shep",
+    standardise = TRUE,
+    n_individuals = 5, #round RAI mean as it has to be integer
+    rand = set_randomisations,
+    use_parallel = TRUE,
+    age_uncertainty = age_uncertainties #add the uncertainty matrix
+  )
+RRatepol::plot_roc(data_source = scenario_4)
+```
+## 5.5. Scenario 4b - Estimating RoC detecting peak points
+Following Mottl et al. (2021) protocol, that identifies points when changes in the community composition are statistically significant
+```{r}
+scenario_4_peak <-
+  RRatepol::detect_peak_points(
+    data_source = scenario_4,
+    sel_method = "trend_non_linear"
+  )
+scenario_4_peak$Peak <- as.vector(scenario_4_peak$Peak)
+
+scenario_4_peak <- scenario_4_peak %>%
+  mutate(ROC_peak = case_when (
+    Peak == "TRUE" ~ ROC,
+    Peak == "FALSE" ~ NA))
+
+scenario_4_peak %>%
+  ggplot(aes(x = Age/1000))+
+  theme_classic() +
+  geom_ribbon(aes(ymin = ROC_dw, ymax = ROC_up), fill = "grey") +
+  geom_line(aes(y = ROC)) + 
+  geom_point(size = 3, aes(y = ROC_peak), shape = 21, fill = "green") +
+  scale_x_reverse() +
+  xlab("Age (ka BP)") + 
+  ylab("Rate of Change (RoC)")
+```
+```{r}
+```
+# 6. RDA with plants classified in groups and animals as explanatory variables
+```{r, eval = FALSE}
+datos.animals <- as_data_frame(RAI_groups_animals)
+datos.animals[is.na(datos.animals)] <- 0
+datos.animals <- datos.animals[c(1:25, 27:46),]
+datos.plants <- as_data_frame(RAI_groups_plants)
+datos.plants <- datos.plants[c(1:25, 27:46),]
+Bos.taurus.RDA <- datos.animals$`Cattle`
+Ovis.aries.RDA <- datos.animals$`Sheep`
+Capra.hircus.RDA <- datos.animals$`Goat`
+Wild.animals.RDA <- datos.animals$`Wild animal`
+Wild.mammals.RDA <- datos.animals$`Wild mammal`
+Other.animals.RDA <- datos.animals$`Other animals`
+
+datos.plants.hell <- decostand (datos.plants, 'hell')  #this is Hellinger pre-transformation
+RDA <- rda (datos.plants.hell ~ Bos.taurus.RDA + Ovis.aries.RDA + Capra.hircus.RDA + Wild.animals.RDA + Wild.mammals.RDA+ Other.animals.RDA, data = datos.animals)  #calculate tb-RDA with six explanatory variables
+RDA
+summary(RDA)
+RsquareAdj(RDA) #total variance explained by RDA
+sqrt(vif.cca(RDA))# check for multicollinearity
+languageR::pairscor.fnc(datos.animals) #pairwise correlations
+
+anova.cca(RDA, permutations = 10000) #permutation test to see global RDA significance
+anova.cca(RDA, permutations = 10000, by = "axis") #permutation test to see axis significance
+anova.cca(RDA, permutations = 10000, by = "terms") #permutation test to see terms significance
+
+constrained_eig <- RDA$CCA$eig/RDA$tot.chi*100
+unconstrained_eig <- RDA$CA$eig/RDA$tot.chi*100
+expl_var <- c(constrained_eig, unconstrained_eig)
+barplot (expl_var[1:20], col = c(rep ('red', length (constrained_eig)), rep ('black', length (unconstrained_eig))),
+         las = 2, ylab = '% variation')
+
+age.rda <- TRAM21_age_depth[c(1:25, 27:46),]
+age.rda <- age.rda[,"age"]
+coord.animals <- as.data.frame(RDA$CCA$biplot)
+rownames(coord.animals) <- c("Cattle", "Sheep", "Goat", "Wild animals", "Wild mammals", "Other animals")
+group.animals <- row.names(coord.animals)
+coord.animals <- cbind(coord.animals, group.animals)
+coord.samples <- as.data.frame(RDA$CCA$u)
+coord.samples <- cbind(coord.samples, age.rda)
+coord.plants <- as.data.frame(RDA$CCA$v)
+group.plants <- row.names(coord.plants)
+coord.plants <- cbind(coord.plants, group.plants)
+
+perc <- round(100*(summary(RDA)$cont$importance[2, 1:2]), 2)
+
+p.rda <- ggplot(coord.samples, aes(x = RDA1, y = RDA2))+
+  theme_classic()+
+  xlab (paste0("RDA1 (", perc[1], "%)")) + 
+  ylab (paste0("RDA2 (", perc[2], "%)")) +
+  geom_vline(xintercept = 0, linetype = 'dashed')+
+  geom_hline(yintercept = 0, linetype = 'dashed')+
+  coord_fixed()+
+  geom_path(color = "#919191")+
+  geom_point(size = 6, aes(fill = age.rda/1000), shape = 21) +
+  scale_fill_gradient(low = 'black', high = "#FFCB00", trans = 'reverse', guide_legend(title = "Age (ka BP)")) +
+  geom_point(data = coord.samples[30,] ,aes(x = RDA1, y = RDA2), col = "red", size = 3, shape = 'circle')+
+  geom_text(size = 4, data = coord.plants, aes(label = group.plants), color = "#361C6B") +
+  geom_text_repel(data = coord.animals, size = 4, aes(label = group.animals))+
+  geom_segment(data = coord.animals, aes(x = 0, y = 0, xend = RDA1, yend = RDA2),
+               arrow = arrow(length = unit(0.3, "cm")))
+```
+Sample scores of two first axis
+```{r}
+scores.RDA <- RDA$CCA$wa %>% as.data.frame()
+scores.RDA1 <- RDA$CCA$wa[,1]
+scores.RDA2 <- RDA$CCA$wa[,2]
+
+pscores <- ggplot (scores.RDA, aes(x = age.rda/1000, y = scores.RDA$RDA1)) +
+  theme_classic() +
+  geom_point() +
+  ylab ("Factor scores RDA1") +
+   scale_x_reverse(limits = c(12.235, 1.331), breaks = c(1, 1.5, 2, 2.5, 3, 3.5, 4,
+                                                        4.5, 5, 5.5, 6, 6.5, 7, 7.5,
+                                                        8, 8.5, 9, 9.5, 10, 10.5, 11,
+                                                        11.5, 12, 12.5),
+                  labels =c('1' = '1', '1.5' = '', '2' = '2', '2.5' = '', '3' = '3', '3.5' = '', '4' = '4', '4.5' = '', '5' = '5', '5.5' = '', '6' = '6', '6.5' = '', '7' = '7', '7.5' = '', '8' = '8', '8.5' = '', '9' = '9', '9.5' = '', '10' = '10', '10.5' = '', '11' = '11', '11.5' = '', '12' = '12', '12.5' = '')) +
+  theme(axis.title.x = element_blank(),
+        axis.text.x  = element_blank())
+```
+# 7. Open landscape taxa treatment
+Import data after experts first cleaning
+```{r, eval = FALSE}
+pastos.limpieza.daniel #dataset after experts cleaning
+```
+```{r}
+pastos.limpieza.daniel.excl <- pastos.limpieza.daniel[-pastos.limpieza.daniel$Included..1.yes.0.no.==0,]
+lista.especies <- strsplit(TRAM21.plants$species_list_pyrenees,", ",fixed=TRUE) #to see maximum number of species list of each taxa
+m <- max(sapply(lista.especies, length)) #11
+
+TRAM21.plants.new <- TRAM21.plants %>%
+  separate(species_list_pyrenees,paste0("species_list_pyrenees",1:11),sep=', ') %>% #separate species in columns
+  pivot_longer(cols = 6:16) %>% #into rows
+  relocate(value, .after = scientific_name) %>% 
+  rename("species_list_pyrenees" = "value") %>% 
+  subset(species_list_pyrenees != 'NA') %>% #filter rows with NA
+  mutate(Daniel = case_when(species_list_pyrenees %in% pastos.limpieza.daniel.excl$species_name ~ "NO",
+                            !(species_list_pyrenees %in% pastos.limpieza.daniel.excl$species_name) ~ "SI")) %>%
+  relocate(Daniel, .after = species_list_pyrenees) %>%
+  as.data.frame() %>%
+  mutate(species_list_pyrenees = ifelse(Daniel == 'NO', scientific_name, species_list_pyrenees)) %>% #I want to eliminate spp the expert said are not in Tramacastilla but I do not want to eliminate the taxa, so I keep the name of scientific_name of species_list_pyrenees in case Daniel == NO
+  distinct()
+```
+Now I have two dataframes, one with spp the expert kept (SI), and the ones he eliminated (NO)
+In "SI" dataframe, merge rows by "id", with species list in one row
+```{r}
+TRAM21.plants.new.SI <- TRAM21.plants.new %>%
+  subset(Daniel == 'SI') %>% #only keep SI
+  pivot_wider(names_from = name, values_from = species_list_pyrenees) %>%
+  unite(col = species_list_pyrenees, 132:142, sep = ', ', na.rm = T) %>%
+  relocate(species_list_pyrenees, .after = scientific_name) %>%
+  as.data.frame()
+```
+The same with "NO" dataframe
+```{r, eval = FALSE}
+TRAM21.plants.new.NO <- TRAM21.plants.new %>%
+  subset(Daniel == 'NO') %>% #only keep NO
+  select(-name) %>%
+  distinct() %>%
+  as.data.frame()
+```
+Merge both dataframes and keep one sequence per row
+```{r, eval = FALSE}
+TRAM21.plants.new_rev <- merge(TRAM21.plants.new.NO, TRAM21.plants.new.SI, all.y = TRUE, all.x = TRUE) #merge dataframes
+TRAM21.plants.new_rev2 <- TRAM21.plants.new_rev %>% #to have one sequence per row
+  group_by(across(-c(species_list_pyrenees, Daniel))) %>%
+  summarise(species_list_pyrenees = paste0(species_list_pyrenees, collapse = ", ")) %>%
+  relocate(species_list_pyrenees, .after = scientific_name)
+```
+We save the list after expert cleaning, and after I clean it so the level of identification correspond to the final taxa it identifies
+## 7.1. Import data after expert cleaning
+```{r, eval = FALSE}
+table1_original #final cleaning
+table1 <- table1_original %>%
+  rename(species_list_pyrenees = species_name)
+```
+## 7.2 Long format of data set with all possible species
+```{r}
+lista.especies.2 <- strsplit(TRAM21.plants$species_list_pyrenees,", ",fixed=TRUE)
+m.2 <- max(sapply(lista.especies.2, length)) #11
+
+TRAM21.long <- TRAM21.plants %>% #long format with each spp of "species_list_pyrenees" in one row
+  separate(species_list_pyrenees,paste0("species_list_pyrenees",1:11),sep=', ') %>% #spp in columns
+  pivot_longer(cols = 6:16) %>% #all possible species into rows
+  relocate(value, .after = scientific_name) %>%
+  rename("species_list_pyrenees" = "value") %>%
+  subset(species_list_pyrenees != 'NA') %>% #filter rows with NA
+  as.data.frame() %>%
+  distinct()
+```
+## 7.3. Include table with expert data with all sedaDNA data
+```{r}
+TRAM21_long_Daniel <- TRAM21.long %>%
+  merge(table1, by = "species_list_pyrenees", all = TRUE) %>%
+  relocate(species_list_pyrenees, .after = scientific_name) %>%
+  relocate(Community_indicator:Comentario, .after = species_list_pyrenees)
+
+colnames(TRAM21_long_Daniel) <- gsub(x = colnames(TRAM21_long_Daniel), pattern = ".x", replacement = "")
+```
+## 7.4. Add a probability factor to each sp according to the number of spp in each taxa
+```{r}
+pastos_long_Daniel <- TRAM21_long_Daniel %>%
+  dplyr::filter(group %in% c("Novel herbaceous taxa", "Herbs", "Open landscape")) %>%
+  group_by(id) %>%
+  mutate(prob = 1/n()) %>% #add probability factor
+  ungroup() %>%
+  relocate(prob, .after = id) %>%
+  select(!name)
+```
+## 7.5. Calculate RAI for each spp
+```{r}
+species_names.plants <- pastos_long_Daniel$species_list_pyrenees
+pastos_long_Daniel_totread_no_blank <- pastos_long_Daniel %>%
+  select(starts_with("totread_sample.TRAM_1b_")) #dataframe with totread information except controls
+renormalize.plants <- function(db){
+  total_reads.plants <- colSums(db)
+  for (i in 1:ncol(db)) db[,i] <- db[,i]/total_reads.plants[i]
+  return(db)
+}
+pastos_long_Daniel_totread_rel_no_blank <- pastos_long_Daniel_totread_no_blank %>%
+  renormalize.plants() %>% #data renormalized
+  as.data.frame()
+
+pastos_long_Daniel_weightrep_no_blank <-pastos_long_Daniel %>%
+  select(starts_with("weightrep_sample.TRAM_1b")) %>% #dataframe with weightrep information except controls
+  mutate(across(everything(), ~ifelse(. <= 0.125, 0, .))) %>% #Discard samples with weightrep <= 0.125, that are considered unreplicated
+  mutate(across(everything(), as.numeric))
+
+pastos_long_Daniel_RAI <- pastos_long_Daniel_totread_rel_no_blank*pastos_long_Daniel_weightrep_no_blank    #multiplicate values into a new dataframe
+pastos_long_Daniel_RAI_T <- pastos_long_Daniel_RAI %>%
+  t() %>% #transpose dataframe
+  as.data.frame()
+colnames(pastos_long_Daniel_RAI_T) <- species_names.plants    #assign species names to columns
+pastos_long_Daniel_RAI_perc <- pastos_long_Daniel_RAI_T/rowSums(pastos_long_Daniel_RAI_T) #compute percentage step1
+pastos_long_Daniel_RAI_perc [is.na(pastos_long_Daniel_RAI_perc)] <- 0 #compute percentage step2
+pastos_long_Daniel_RAI_perc <- pastos_long_Daniel_RAI_perc*100 #compute percentage step3
+
+rownames(pastos_long_Daniel_RAI_perc) <- gsub(x = rownames(pastos_long_Daniel_RAI_perc), pattern = "totread_", replacement = "RAI_")
+```
+## 7.6. Merge RAI data with expert data
+```{r}
+pastos_long_Daniel_RAI_all <- pastos_long_Daniel_RAI_perc %>%
+  t() %>%
+  as.data.frame() %>%
+  cbind(pastos_long_Daniel[,1:22]) %>%
+  relocate(c(47:68), .before = "RAI_sample.TRAM_1b_3U_11.12_rpt")
+```
+Re-calculate RAI according to probability factor
+```{r}
+pastos_long_Daniel_RAI_all_prob <- pastos_long_Daniel_RAI_all %>%
+  mutate(prob*pastos_long_Daniel_RAI_all[,c(23:68)])
+rownames(pastos_long_Daniel_RAI_all_prob) <- NULL
+```
+# 8. RDA open landscape with species favoured by grazing, trampling or fertilization
+```{r}
+animal_groups_RDA <- (TRAM21.animals$RDA_group)
+unique(TRAM21.animals$RDA_group)
+Bos.taurus.RDA1 <- colSums(TRAM21.animals_RAI[animal_groups_RDA=="Bos taurus",])
+Ovis.aries.RDA1 <- colSums(TRAM21.animals_RAI[animal_groups_RDA=="Ovis aries",])
+Capra.hircus.RDA1 <- colSums(TRAM21.animals_RAI[animal_groups_RDA=="Capra hircus",])
+Cervus.elaphus.RDA1 <- colSums(TRAM21.animals_RAI[animal_groups_RDA=="Cervus elaphus",])
+Ursus.arctos.RDA1 <- colSums(TRAM21.animals_RAI[animal_groups_RDA=="Ursus arctos",])
+Small.mammal.RDA1 <- colSums(TRAM21.animals_RAI[animal_groups_RDA=="Small mammal",])
+Other.animals.RDA1 <- colSums(TRAM21.animals_RAI[animal_groups_RDA=="Other animals",])
+
+RDA_groups_animals <-cbind(Bos.taurus.RDA1, Ovis.aries.RDA1, Capra.hircus.RDA1, Cervus.elaphus.RDA1,
+                           Ursus.arctos.RDA1, Small.mammal.RDA1, Other.animals.RDA1)
+
+for (i in 1:ncol(RDA_groups_animals)) RDA_groups_animals[,i] <- as.numeric(RDA_groups_animals[,i])
+```
+## 8.1 Classification variable with ways of favouring
+```{r}
+datos_pastos_RDA1 <- pastos_long_Daniel_RAI_all_prob %>%
+  mutate(Favoured_domestics =
+           case_when(Favoured_by_domestics_as_grazing == 1 & Favoured_by_domestics_as_trampling == 1 ~ "Grazing_Trampling",
+                     Favoured_by_domestics_as_grazing == 1  ~ "Grazing",
+                     Favoured_by_domestics_as_trampling == 1 ~ "Trampling",
+                     Favoured_by_domestics_as_fertilization == 1 ~ "Fertilization")) %>%
+  relocate(Favoured_domestics, .before = Favoured_by_domestics_as_grazing)
+```
+## 8.2 Data preparation
+```{r}
+RDA1.Grazing <- 
+  datos_pastos_RDA1 %>%
+  dplyr::filter(Favoured_domestics == "Grazing") %>%
+  select_if(is.numeric) %>%
+  colSums()
+
+RDA1.Trampling <- 
+  datos_pastos_RDA1 %>%
+  dplyr::filter(Favoured_domestics == "Trampling") %>%
+  select_if(is.numeric) %>%
+  colSums()
+
+RDA1.Fertilization <- 
+  datos_pastos_RDA1 %>%
+  dplyr::filter(Favoured_domestics == "Fertilization") %>%
+  select_if(is.numeric) %>%
+  colSums()
+
+RDA1.Grazing_Trampling <- 
+  datos_pastos_RDA1 %>%
+  dplyr::filter(Favoured_domestics == "Grazing_Trampling") %>%
+  select_if(is.numeric) %>%
+  colSums()
+
+datos.plants.RDA1 <- bind_rows(RDA1.Grazing, RDA1.Trampling, RDA1.Fertilization, RDA1.Grazing_Trampling) %>%
+  select(c(11:56)) %>%
+  t()
+colnames(datos.plants.RDA1) <- c("Grazing", "Trampling", "Fertilization", "Grazing and Trampling")
+```
+## 8.3 RDA
+```{r, eval= FALSE}
+datos.animals.RDA1 <- RDA_groups_animals[c(1:25, 27:46),]
+datos.animals.RDA1 <- as_tibble(datos.animals.RDA1)
+for (i in 1:ncol(datos.plants.RDA1)) datos.plants.RDA1[,i] <- as.numeric(datos.plants.RDA1[,i])
+datos.plants.RDA1 <- datos.plants.RDA1[c(1:25, 27:46),]
+Bos.taurus.RDA1 <- datos.animals.RDA1$Bos.taurus.RDA1
+Ovis.aries.RDA1 <- datos.animals.RDA1$Ovis.aries.RDA1
+Capra.hircus.RDA1 <- datos.animals.RDA1$Capra.hircus.RDA1
+Cervus.elaphus.RDA1 <- datos.animals.RDA1$Cervus.elaphus.RDA1
+Other.animals.RDA1 <- datos.animals.RDA1$Other.animals.RDA1
+
+datos.plants.RDA1.hell <- decostand (datos.plants.RDA1, 'hell')  #this is Hellinger pre-transformation
+RDA.1 <- rda (datos.plants.RDA1.hell ~ Bos.taurus.RDA1 + Ovis.aries.RDA1 + Capra.hircus.RDA1 + Cervus.elaphus.RDA1 + Other.animals.RDA1, data = datos.animals.RDA1)  # calculate tb-RDA with four explanatory variables
+RDA.1
+summary(RDA.1)
+RsquareAdj(RDA.1) #total variance explained by RDA: 0.26
+sqrt(vif.cca(RDA.1))# check for multicollinearity: no VIF > 1.5 -> no multicollinearity
+languageR::pairscor.fnc(datos.animals.RDA1) #pairwise correlations
+
+anova.cca(RDA.1, permutations = 10000) #permutation test to see global RDA significance: significant
+anova.cca(RDA.1, permutations = 10000, by = "axis") #permutation test to see axis significance: RDA1 significant
+anova.cca(RDA.1, permutations = 10000, by = "terms") #permutation test to see terms significance: cow significant
+
+constrained_eig <- RDA.1$CCA$eig/RDA.1$tot.chi*100
+unconstrained_eig <- RDA.1$CA$eig/RDA.1$tot.chi*100
+expl_var <- c(constrained_eig, unconstrained_eig)
+barplot (expl_var[1:20], col = c(rep ('red', length (constrained_eig)), rep ('black', length (unconstrained_eig))),
+         las = 2, ylab = '% variation')
+
+age.rda <- TRAM21_age_depth[c(1:25, 27:46),]
+age.rda <- age.rda[,"age"]
+coord.animals.RDA1 <- as.data.frame(RDA.1$CCA$biplot)
+rownames(coord.animals.RDA1) <- c("Cattle", "Sheep", "Goat", "Red deer", "Other animals")
+group.animals.RDA1 <- row.names(coord.animals.RDA1)
+coord.animals.RDA1 <- cbind(coord.animals.RDA1, group.animals.RDA1)
+coord.samples.RDA1 <- as.data.frame(RDA.1$CCA$u)
+coord.samples.RDA1 <- cbind(coord.samples.RDA1, age.rda)
+coord.plants.RDA1 <- as.data.frame(RDA.1$CCA$v)
+group.plants.RDA1 <- row.names(coord.plants.RDA1)
+coord.plants.RDA1 <- cbind(coord.plants.RDA1, group.plants.RDA1)
+
+perc.RDA1 <- round(100*(summary(RDA.1)$cont$importance[2, 1:2]), 2)
+
+p.rda1 <- ggplot(coord.samples.RDA1, aes(x = RDA1, y = RDA2))+
+  theme_classic()+
+  xlab (paste0("RDA1 (", perc.RDA1[1], "%)")) + 
+  ylab (paste0("RDA2 (", perc.RDA1[2], "%)"))+
+  geom_vline(xintercept = 0, linetype = 'dashed')+
+  geom_hline(yintercept = 0, linetype = 'dashed')+
+  coord_fixed()+
+  geom_path(color = "#919191")+
+  geom_point(size = 6, aes(fill = age.rda/1000), shape = 21) +
+  scale_fill_gradient(low = 'black', high = "#FFCB00", trans = 'reverse', guide_legend(title = "Age (ka BP)")) +
+  geom_point(data = coord.samples.RDA1[30,] ,aes(x = RDA1, y = RDA2), col = "red", size = 3, shape = 'circle')+
+  geom_text(size = 4, data = coord.plants.RDA1, aes(label = group.plants.RDA1), color = "#361C6B") +
+  geom_text_repel(data = coord.animals.RDA1, size = 4, aes(label = group.animals.RDA1))+
+  geom_segment(data = coord.animals.RDA1, aes(x = 0, y = 0, xend = RDA1, yend = RDA2),
+               arrow = arrow(length = unit(0.3, "cm")))
+```
+Sample scores of two first axis
+```{r}
+scores.RDA.1 <- RDA.1$CCA$wa %>% as.data.frame()
+scores.RDA1.1 <- RDA.1$CCA$wa[,1]
+scores.RDA2.1 <- RDA.1$CCA$wa[,2]
+
+pscores.1 <- ggplot (scores.RDA.1, aes(x = age.rda/1000, y = scores.RDA.1$RDA1)) +
+  theme_classic() +
+  geom_point() +
+  ylab ("Factor scores RDA1") +
+  scale_x_reverse(limits = c(12.235, 1.331), breaks = c(1, 1.5, 2, 2.5, 3, 3.5, 4,
+                                                        4.5, 5, 5.5, 6, 6.5, 7, 7.5,
+                                                        8, 8.5, 9, 9.5, 10, 10.5, 11,
+                                                        11.5, 12, 12.5),
+                  labels =c('1' = '1', '1.5' = '', '2' = '2', '2.5' = '', '3' = '3', '3.5' = '', '4' = '4', '4.5' = '', '5' = '5', '5.5' = '', '6' = '6', '6.5' = '', '7' = '7', '7.5' = '', '8' = '8', '8.5' = '', '9' = '9', '9.5' = '', '10' = '10', '10.5' = '', '11' = '11', '11.5' = '', '12' = '12', '12.5' = '')) +
+  geom_smooth(method = 'loess', color = "dark green") +
+  xlab ("Age (ka BP)")
+```
+# 9. Figure 2: with RAI, richness, RoC, Mendukilo and BSM temperature reconstructions
+```{r}
+p2a <- long_RAI_plants.p  %>%
+  dplyr::filter(group %in% c("Decidious tree", "Open landscape", "Novel herbaceous taxa", "Herbs")) %>%
+  mutate(group = fct_relevel(group, "Decidious tree", "Open landscape", "Novel herbaceous taxa", "Herbs")) %>%
+  ggplot(aes(x=age/1000, y=round(RAI_percentage, 2) , group=group, fill=group))+
+  guides (fill = guide_legend(title = "Plant group")) +
+  ylab("% RAI") +
+  theme_classic() +
+  theme (legend.position = "right")+
+  geom_col(width = 0.15) + scale_x_reverse(limits = c(12.235, 1.331), breaks = c(1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10, 10.5, 11, 11.5, 12, 12.5),
+                                           labels =c('1' = '1', '1.5' = '', '2' = '2', '2.5' = '', '3' = '3', '3.5' = '', '4' = '4', '4.5' = '', '5' = '5', '5.5' = '', '6' = '6', '6.5' = '', '7' = '7', '7.5' = '', '8' = '8', '8.5' = '', '9' = '9', '9.5' = '', '10' = '10', '10.5' = '', '11' = '11', '11.5' = '', '12' = '12', '12.5' = '')) +
+  scale_fill_manual(values = c("#7EC3E5", "#FFD8B2", "#6B990F", "#C3E57E")) +
+  scale_y_continuous(breaks = seq(0, 100, 50)) +
+  theme(axis.title.x = element_blank()) 
+
+p2b <- long_RAI_plants.p  %>%
+  dplyr::filter(group %in% c("Abies alba", "Pinus")) %>%
+  ggplot(aes(x=age/1000, y=round(RAI_percentage, 2) , group=group, fill=group))+
+  guides (fill = guide_legend(title = "")) +
+  ylab("")+
+  theme_classic() +
+  theme (legend.position = "right", legend.text = element_text(face = "italic"))+
+  geom_col(width = 0.15) + scale_x_reverse(limits = c(12.235, 1.331), breaks = c(1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10, 10.5, 11, 11.5, 12, 12.5),
+                                           labels =c('1' = '1', '1.5' = '', '2' = '2', '2.5' = '', '3' = '3', '3.5' = '', '4' = '4', '4.5' = '', '5' = '5', '5.5' = '', '6' = '6', '6.5' = '', '7' = '7', '7.5' = '', '8' = '8', '8.5' = '', '9' = '9', '9.5' = '', '10' = '10', '10.5' = '', '11' = '11', '11.5' = '', '12' = '12', '12.5' = '')) +
+  scale_fill_manual(values = c("#BFB2FF", "#422CB2")) +
+  scale_y_continuous(breaks = seq(0, 100, 50)) +
+  theme(axis.title.x = element_blank())
+
+p2c <- long_RAI_animals.p %>%
+  dplyr::filter(group %in% c("Wild animal", "Wild mammal")) %>%
+  ggplot(aes(x=age/1000, y=round(RAI_percentage, 2) , group=group, fill=group))+
+  guides (fill = guide_legend(title = "")) +
+  ylab("")+
+  theme_classic() +
+  theme (legend.position = "right")+
+  geom_col(width = 0.15) + scale_x_reverse(limits = c(12.235, 1.331), breaks = c(1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10, 10.5, 11, 11.5, 12, 12.5),
+                                           labels =c('1' = '1', '1.5' = '', '2' = '2', '2.5' = '', '3' = '3', '3.5' = '', '4' = '4', '4.5' = '', '5' = '5', '5.5' = '', '6' = '6', '6.5' = '', '7' = '7', '7.5' = '', '8' = '8', '8.5' = '', '9' = '9', '9.5' = '', '10' = '10', '10.5' = '', '11' = '11', '11.5' = '', '12' = '12', '12.5' = '')) + 
+  scale_y_continuous(breaks = seq(0, 100, 50)) +
+  scale_fill_manual(values = c("#E5B17E", "#B26F2C"))+
+  theme(axis.title.x = element_blank())
+
+p2d <- long_RAI_animals.p %>%
+  dplyr::filter(group %in% c("Sheep", "Goat")) %>%
+  mutate(group = fct_relevel(group, "Sheep", "Goat")) %>%
+  ggplot(aes(x=age/1000, y=round(RAI_percentage, 2) , group=group, fill=group))+
+  guides (fill = guide_legend(title = "")) +
+  ylab("")+
+  theme_classic() +
+  theme (legend.position = "right")+
+  geom_col(width = 0.15) + scale_x_reverse(limits = c(12.235, 1.331), breaks = c(1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10, 10.5, 11, 11.5, 12, 12.5),
+                                           labels =c('1' = '1', '1.5' = '', '2' = '2', '2.5' = '', '3' = '3', '3.5' = '', '4' = '4', '4.5' = '', '5' = '5', '5.5' = '', '6' = '6', '6.5' = '', '7' = '7', '7.5' = '', '8' = '8', '8.5' = '', '9' = '9', '9.5' = '', '10' = '10', '10.5' = '', '11' = '11', '11.5' = '', '12' = '12', '12.5' = '')) +
+  scale_fill_manual(values = c("#FFB2B2", "#B22C2C")) +
+  scale_y_continuous(breaks = seq(0, 100, 50)) +
+  theme(axis.title.x = element_blank())
+
+p2e <- long_RAI_animals.p %>%
+  dplyr::filter(group == "Cattle") %>%
+  ggplot(aes(x=age/1000, y=round(RAI_percentage, 2) , group=group, fill=group))+
+  guides (fill = guide_legend(title = "Animal group")) +
+  ylab("")+
+  theme_classic() +
+  theme (legend.position = "right")+
+  geom_col(width = 0.15) + scale_x_reverse(limits = c(12.235, 1.331), breaks = c(1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10, 10.5, 11, 11.5, 12, 12.5),
+                                           labels =c('1' = '1', '1.5' = '', '2' = '2', '2.5' = '', '3' = '3', '3.5' = '', '4' = '4', '4.5' = '', '5' = '5', '5.5' = '', '6' = '6', '6.5' = '', '7' = '7', '7.5' = '', '8' = '8', '8.5' = '', '9' = '9', '9.5' = '', '10' = '10', '10.5' = '', '11' = '11', '11.5' = '', '12' = '12', '12.5' = '')) +
+  scale_fill_manual(values = "#E57E7E") + 
+  scale_y_continuous(breaks = seq(0, 100, 50)) +
+  theme(axis.title.x = element_blank())
+
+p2f <- ggplot(data = DNA.richness[c(1:25, 27:46),], aes(x = age/1000, y = Total.taxa.richness)) +
+  ylab("Taxa richness")+
+  theme_classic() + 
+  geom_point() + scale_x_reverse(limits = c(12.235, 1.331), breaks = c(1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10, 10.5, 11, 11.5, 12, 12.5),
+                                           labels =c('1' = '1', '1.5' = '', '2' = '2', '2.5' = '', '3' = '3', '3.5' = '', '4' = '4', '4.5' = '', '5' = '5', '5.5' = '', '6' = '6', '6.5' = '', '7' = '7', '7.5' = '', '8' = '8', '8.5' = '', '9' = '9', '9.5' = '', '10' = '10', '10.5' = '', '11' = '11', '11.5' = '', '12' = '12', '12.5' = '')) +
+  scale_y_continuous(breaks = seq(0, 250, 100)) +
+  geom_smooth(method = 'loess', color = "dark green") +
+  theme(axis.title.x = element_blank()) +
+  geom_point(data = DNA.richness[26,], aes(x= age/1000, y = Total.taxa.richness), col = "dark grey") #outlayer represented in grey
+
+p2g <- scenario_4_peak %>%
+  ggplot(aes(x = Age/1000)) +
+  theme_classic() +
+  geom_ribbon(aes(ymin = ROC_dw, ymax = ROC_up), fill = "grey") +
+  geom_line(aes(y = ROC)) + 
+  geom_point(size = 3, aes(y = ROC_peak), shape = 21, fill = "green") +
+  ylab("RoC") + xlab("") +
+  scale_x_reverse(limits = c(12.235, 1.331), breaks = c(1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10, 10.5, 11, 11.5, 12, 12.5),
+                                           labels =c('1' = '1', '1.5' = '', '2' = '2', '2.5' = '', '3' = '3', '3.5' = '', '4' = '4', '4.5' = '', '5' = '5', '5.5' = '', '6' = '6', '6.5' = '', '7' = '7', '7.5' = '', '8' = '8', '8.5' = '', '9' = '9', '9.5' = '', '10' = '10', '10.5' = '', '11' = '11', '11.5' = '', '12' = '12', '12.5' = '')) +
+  scale_y_continuous(breaks = seq(0, 30, 15))
+
+p2h <- ggplot (scores.RDA, aes(x = age.rda/1000, y = scores.RDA$RDA1)) +
+  theme_classic() +
+  geom_point() +
+  ylab ("Factor scores RDA1") +
+  scale_x_reverse(limits = c(12.235, 1.331), breaks = c(1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10, 10.5, 11, 11.5, 12, 12.5),
+                                           labels =c('1' = '1', '1.5' = '', '2' = '2', '2.5' = '', '3' = '3', '3.5' = '', '4' = '4', '4.5' = '', '5' = '5', '5.5' = '', '6' = '6', '6.5' = '', '7' = '7', '7.5' = '', '8' = '8', '8.5' = '', '9' = '9', '9.5' = '', '10' = '10', '10.5' = '', '11' = '11', '11.5' = '', '12' = '12', '12.5' = ''))+
+  theme(axis.title.x = element_blank())
+```
+## 9.1. Import information from other records (Mendukilo and Basa de la Mora)
+```{r}
+head(BSM_Temp_original) # dataset for Basa de la Mora lake
+head(Mendukilo_original) # dataset for Mendukilo cave
+```
+Basa de la Mora Temperature (BSM_temp)
+```{r}
+BSM_Temp <- BSM_Temp_original %>%
+  mutate_all(as.numeric) %>%
+  rename("age.BSM_Temp" = "age") %>%
+  mutate(age.BSM_Temp = age.BSM_Temp/1000)
+
+p2i <- BSM_Temp %>%
+  ggplot(aes(x=age.BSM_Temp, y=WAPLS_C2))+
+  xlab("") +
+  ylab("Temperature (ºC)") +
+  theme_classic() +
+  geom_line() + scale_x_reverse(limits = c(12.235, 1.331), breaks = c(1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10, 10.5, 11, 11.5, 12, 12.5),
+                                           labels =c('1' = '1', '1.5' = '', '2' = '2', '2.5' = '', '3' = '3', '3.5' = '', '4' = '4', '4.5' = '', '5' = '5', '5.5' = '', '6' = '6', '6.5' = '', '7' = '7', '7.5' = '', '8' = '8', '8.5' = '', '9' = '9', '9.5' = '', '10' = '10', '10.5' = '', '11' = '11', '11.5' = '', '12' = '12', '12.5' = '')) +
+  theme(axis.title.x = element_blank()) +
+  geom_errorbar(aes(ymax = WAPLS_C2 + eSEP_WAPLS_C2,
+                    ymin = WAPLS_C2 - eSEP_WAPLS_C2,
+                    alpha = 0.2,
+                    width=0.05)) +
+  theme(legend.position = "none")
+```
+Mendukilo temperature
+```{r}
+Mendukilo <- Mendukilo_original %>%
+  mutate_all(as.numeric) %>%
+  rename("age.Mendukilo" = "age..kyr.BP.") %>%
+  rename("d13C.Mendukilo" = "d13C..permil.")
+  
+p2j <- Mendukilo %>%
+  ggplot(aes(x=age.Mendukilo, y=d13C.Mendukilo))+
+  xlab("") +
+  ylab("d13C")+
+  theme_classic() +
+  geom_line() + scale_y_reverse() + scale_x_reverse(limits = c(12.235, 1.331), breaks = c(1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10, 10.5, 11, 11.5, 12, 12.5),
+                                           labels =c('1' = '1', '1.5' = '', '2' = '2', '2.5' = '', '3' = '3', '3.5' = '', '4' = '4', '4.5' = '', '5' = '5', '5.5' = '', '6' = '6', '6.5' = '', '7' = '7', '7.5' = '', '8' = '8', '8.5' = '', '9' = '9', '9.5' = '', '10' = '10', '10.5' = '', '11' = '11', '11.5' = '', '12' = '12', '12.5' = ''))+
+  theme(axis.title.x = element_blank())
+```
+Figure 2
+```{r}
+fig_2 <- p2a/p2b/p2c/p2d/p2e/p2f/p2g/p2h/p2i/p2j + plot_layout(design = c("A
+                                                      B
+                                                      C
+                                                      D
+                                                      E
+                                                      F
+                                                      G
+                                                      H
+                                                      I
+                                                      J
+                                                      J"))
+```
+# 10. Fig 3- RDA figure
+Including both RDAs analysed in this code (parts 6 and 8)
+```{r}
+fig_3 <- p.rda + p.rda1 + plot_layout(ncol = 2)
+```
+# 11. Tables for supplementary material
+## 11.1 Table 2 supplementary material
+```{r}
+RAI_groups_plants_perc <- as.data.frame(RAI_groups_plants_perc)
+summary(RAI_groups_plants_perc)
+sd(RAI_groups_plants_perc$`Abies alba`)
+sd(RAI_groups_plants_perc$Pinus)
+sd(RAI_groups_plants_perc$`Deciduous tree`)
+sd(RAI_groups_plants_perc$`Open landscape`)
+sd(RAI_groups_plants_perc$`Novel herbaceous taxa`)
+sd(RAI_groups_plants_perc$Herbs)
+sd(RAI_groups_plants_perc$Shrub)
+sd(RAI_groups_plants_perc$`Other tree`)
+sd(RAI_groups_plants_perc$`Other plant`)
+```
+## 11.2 Table 3 supplementary material
+```{r}
+RAI_groups_animals_perc <- as.data.frame(RAI_groups_animals_perc)
+summary(RAI_groups_animals_perc)
+sd(RAI_groups_animals_perc$Cattle)
+sd(RAI_groups_animals_perc$Sheep)
+sd(RAI_groups_animals_perc$Goat)
+sd(RAI_groups_animals_perc$`Wild animal`)
+sd(RAI_groups_animals_perc$`Wild mammal`)
+sd(RAI_groups_animals_perc$`Other animals`)
+```
+## 11.3 Table 4 supplementary material
+```{r}
+summary(Total.taxa.richness[c(1:25, 27:46)])
+sd(Total.taxa.richness[c(1:25, 27:46)])
+```
+## 11.4 Table 5 supplementary material
+```{r}
+summary(RDA)
+```
+## 11.5 Table 6 supplementary material
+```{r}
+RsquareAdj(RDA) #total variance explained by RDA
+```
+## 11.6 Table 7 supplementary material
+```{r}
+anova.cca(RDA, permutations = 10000) #permutation test to see global RDA significance
+```
+## 11.7 Table 8 supplementary material
+```{r}
+anova.cca(RDA, permutations = 10000, by = "axis") #permutation test to see axis significance
+```
+## 11.8 Table 9 supplementary material
+```{r}
+anova.cca(RDA, permutations = 10000, by = "terms") #permutation test to see terms significance
+```
+## 11.9 Table 10 and Figure 13 supplementary material
+```{r}
+sqrt(vif.cca(RDA))#check for multicollinearity
+languageR::pairscor.fnc(datos.animals) #pairwise correlations
+```
+## 11.10 Table 11 supplementary material
+```{r}
+summary(RDA.1)
+```
+## 11.11 Table 12 supplementary material
+```{r}
+RsquareAdj(RDA.1) #total variance explained by RDA: 0.26
+```
+## 11.12 Table 13 supplementary material
+```{r}
+anova.cca(RDA.1, permutations = 10000) #permutation test to see global RDA significance: significant
+```
+## 11.13 Table 14 supplementary material
+```{r}
+anova.cca(RDA.1, permutations = 10000, by = "axis") #permutation test to see axis significance: RDA1 significant
+```
+## 11.14 Table 15 supplementary material
+```{r}
+anova.cca(RDA.1, permutations = 10000, by = "terms") #permutation test to see terms significance: cow significant
+```
+## 11.15 Table 16 and Figure 14 supplementary material
+```{r}
+sqrt(vif.cca(RDA.1))#check for multicollinearity: no VIF > 1.5 -> no multicollinearity
+languageR::pairscor.fnc(datos.animals.RDA1) #pairwise correlations
+```
+# 12. Full plant weightrep data diagrams for supplementary material
+Obtain dataframe
+```{r}
+taxa.group2.plants <- TRAM21.plants %>% select(scientific_name, group2)
+TRAM21.plants_weightrep_no_blank_diagram <- TRAM21.plants %>%
+  select(starts_with("weightrep_sample.TRAM_1b_")) %>% #dataframe with all weightrep information except controls
+  mutate(across(everything(), as.numeric))
+TRAM21.plants_weightrep_no_blank_diagram_T <- t(TRAM21.plants_weightrep_no_blank_diagram)    #transpose dataframe
+colnames(TRAM21.plants_weightrep_no_blank_diagram_T) <- taxa_names.plants    #assign species names to columns
+temp_plants_weightrep_age <- cbind(age, TRAM21.plants_weightrep_no_blank_diagram_T)    #dataframe with weightrep information for each taxa
+scientific_name <- colnames(temp_plants_weightrep_age)
+data.diagram.plants <- t(temp_plants_weightrep_age) %>%
+  as.data.frame() %>%
+  mutate("scientific_name" = scientific_name) %>%
+  relocate(scientific_name, .before = "weightrep_sample.TRAM_1b_3U_11.12_rpt") %>%
+  full_join(taxa.group2.plants, by = "scientific_name") %>%
+  relocate(group2, .after = "scientific_name") %>%
+  mutate_all(~replace(., is.na(.), "age")) #NA = age as we only have 1 NA in the age
+```
+## 12.1 Conifers + Deciduous tree + Evergreen tree + Other tree + Ilex
+```{r}
+data.diagram.plants.trees <- data.diagram.plants %>%
+  filter(group2 %in% c("age", "Conifer", "Deciduous tree", "Evergreen tree",
+                       "Other tree", "Ilex aquifolium")) %>%
+  arrange(group2 = fct_relevel(group2,"age", "Conifer", "Deciduous tree",
+                               "Evergreen tree", "Other tree", "Ilex aquifolium")) %>%
+  select(-group2) %>%
+  t()
+colnames(data.diagram.plants.trees) <- data.diagram.plants.trees[1,]
+
+data.diagram.plants.trees <- data.diagram.plants.trees %>%
+  as.data.frame() %>%
+  slice(-1) %>%
+  mutate_all(as.numeric)
+
+p12.1 <- strat.plot(data.diagram.plants.trees[,2:30], yvar = age/1000, y.rev=TRUE,
+                    srt.xlabel=90,
+                    title = "Conifers",
+                    cex.title = 1,
+                    cex.axis=0.6,
+                    cex.xlabel = 1,
+                    plot.line=FALSE,
+                    ylabel = "Age (ka BP)",
+                    plot.bar=T,
+                    scale.percent=FALSE,
+                    lwd.bar=3,
+                    minmax=matrix(c(0,1),ncol=2, nrow=ncol(data.diagram.plants.trees[,2:30]),byrow=TRUE))
+```
+## 12.2 Shrub + Open scrub
+```{r}
+data.diagram.plants.shrub <- data.diagram.plants %>%
+  filter(group2 %in% c("age", "Shrub", "Open scrub")) %>%
+  arrange(group2 = fct_relevel(group2, "age", "Shrub", "Open scrub")) %>%
+  select(-group2) %>%
+  t()
+colnames(data.diagram.plants.shrub) <- data.diagram.plants.shrub[1,]
+
+data.diagram.plants.shrub <- data.diagram.plants.shrub %>%
+  as.data.frame() %>%
+  slice(-1) %>%
+  mutate_all(as.numeric)
+
+p12.2 <- strat.plot(data.diagram.plants.shrub[,2:35], yvar = age/1000, y.rev=TRUE,
+                    srt.xlabel=90,
+                    title = "Shrub",
+                    cex.title = 1,
+                    cex.axis=0.6,
+                    cex.xlabel = 0.8,
+                    plot.line=FALSE,
+                    ylabel = "Age (ka BP)",
+                    plot.bar=T,
+                    scale.percent=FALSE,
+                    lwd.bar=3,
+                    minmax=matrix(c(0,1), ncol=2, nrow=ncol(data.diagram.plants.shrub[,2:35]), byrow=TRUE))
+```
+## 12.3 Novel herbaceus taxa
+```{r}
+data.diagram.plants.novel <- data.diagram.plants %>%
+  filter(group2 %in% c("age", "Novel herbaceous taxa")) %>%
+  select(-group2) %>%
+  t()
+colnames(data.diagram.plants.novel) <- data.diagram.plants.novel[1,]
+
+data.diagram.plants.novel <- data.diagram.plants.novel %>%
+  as.data.frame() %>%
+  slice(-1) %>%
+  mutate_all(as.numeric)
+
+p12.3 <- strat.plot(data.diagram.plants.novel[,2:42], yvar = age/1000, y.rev=TRUE,
+                    srt.xlabel=90,
+                    title = "Novel herbaceous taxa",
+                    cex.title = 1,
+                    cex.axis=0.6,
+                    cex.xlabel = 0.8,
+                    plot.line=FALSE,
+                    ylabel = "Age (ka BP)",
+                    plot.bar=T,
+                    scale.percent=FALSE,
+                    lwd.bar=3,
+                    minmax=matrix(c(0,1), ncol=2, nrow=ncol(data.diagram.plants.novel[,2:42]), byrow=TRUE))
+```
+## 12.4 Herbaceous taxa
+```{r}
+data.diagram.plants.herb <- data.diagram.plants %>%
+  filter(group2 %in% c("age", "Herbaceous taxa")) %>%
+  select(-group2) %>%
+  t()
+colnames(data.diagram.plants.herb) <- data.diagram.plants.herb[1,]
+
+data.diagram.plants.herb <- data.diagram.plants.herb %>%
+  as.data.frame() %>%
+  slice(-1) %>%
+  mutate_all(as.numeric)
+
+p12.41 <- strat.plot(data.diagram.plants.herb[,2:59], yvar = age/1000, y.rev=TRUE,
+                     srt.xlabel=90,
+                     title = "Herbaceous taxa",
+                     cex.title = 1,
+                     cex.axis=0.6,
+                     cex.xlabel = 0.8,
+                     plot.line=FALSE,
+                     ylabel = "Age (ka BP)",
+                     plot.bar=T,
+                     scale.percent=FALSE,
+                     lwd.bar=3,
+                     minmax=matrix(c(0,1), ncol=2, nrow=ncol(data.diagram.plants.herb[,2:59]), byrow=TRUE))
+p12.42 <- strat.plot(data.diagram.plants.herb[,60:117], yvar = age/1000, y.rev=TRUE,
+                     srt.xlabel=90,
+                     title = "Herbaceous taxa",
+                     cex.title = 1,
+                     cex.axis=0.6,
+                     cex.xlabel = 0.8,
+                     plot.line=FALSE,
+                     ylabel = "Age (ka BP)",
+                     plot.bar=T,
+                     scale.percent=FALSE,
+                     lwd.bar=3,
+                     minmax=matrix(c(0,1), ncol=2, nrow=ncol(data.diagram.plants.herb[,60:117]), byrow=TRUE))
+p12.43 <- strat.plot(data.diagram.plants.herb[,118:174], yvar = age/1000, y.rev=TRUE,
+                     srt.xlabel=90,
+                     title = "Herbaceous taxa",
+                     cex.title = 1,
+                     cex.axis=0.6,
+                     cex.xlabel = 0.8,
+                     plot.line=FALSE,
+                     ylabel = "Age (ka BP)",
+                     plot.bar=T,
+                     scale.percent=FALSE,
+                     lwd.bar=3,
+                     minmax=matrix(c(0,1), ncol=2, nrow=ncol(data.diagram.plants.herb[,118:174]), byrow=TRUE))
+
+p12.44 <- strat.plot(data.diagram.plants.herb[,175:228], yvar = age/1000, y.rev=TRUE,
+                     srt.xlabel=90,
+                     title = "Herbaceous taxa",
+                     cex.title = 1,
+                     cex.axis=0.6,
+                     cex.xlabel = 0.8,
+                     plot.line=FALSE,
+                     ylabel = "Age (ka BP)",
+                     plot.bar=T,
+                     scale.percent=FALSE,
+                     lwd.bar=3,
+                     minmax=matrix(c(0,1), ncol=2, nrow=ncol(data.diagram.plants.herb[,175:228]), byrow=TRUE))
+```
+## 12.5 Nemoral + Pteridophyta + Not native + Other
+```{r}
+data.diagram.plants.nemoral <- data.diagram.plants %>%
+  filter(group2 %in% c("age", "Nemoral", "Pteridophyta", "Not native", "Other")) %>%
+  arrange(group2 = fct_relevel(group2, "age", "Nemoral", "Pteridophyta", "Not native", "Other")) %>%
+  select(-group2) %>%
+  t()
+colnames(data.diagram.plants.nemoral) <- data.diagram.plants.nemoral[1,]
+
+data.diagram.plants.nemoral <- data.diagram.plants.nemoral %>%
+  as.data.frame() %>%
+  slice(-1) %>%
+  mutate_all(as.numeric)
+
+p12.5 <- strat.plot(data.diagram.plants.nemoral[,2:24], yvar = age/1000, y.rev=TRUE,
+                    srt.xlabel=90,
+                    title = "Nemoral",
+                    cex.title = 1,
+                    cex.axis=0.6,
+                    cex.xlabel = 0.8,
+                    plot.line=FALSE,
+                    ylabel = "Age (ka BP)",
+                    plot.bar=T,
+                    scale.percent=FALSE,
+                    lwd.bar=3,
+                    minmax=matrix(c(0,1), ncol=2, nrow=ncol(data.diagram.plants.nemoral[,2:24]), byrow=TRUE))
+```
+## 12.6 Algae + Bryophytes + Hydrophytes + Hygrophytes
+```{r}
+data.diagram.plants.algae <- data.diagram.plants %>%
+  filter(group2 %in% c("age", "Algae", "Bryophyte", "Hydrophyte", "Hygrophyte")) %>%
+  arrange(group2 = fct_relevel(group2, "age", "Algae", "Bryophyte", "Hydrophyte", "Hygrophyte")) %>%
+  select(-group2) %>%
+  t()
+colnames(data.diagram.plants.algae) <- data.diagram.plants.algae[1,]
+
+data.diagram.plants.algae <- data.diagram.plants.algae %>%
+  as.data.frame() %>%
+  slice(-1) %>%
+  mutate_all(as.numeric)
+
+p12.6 <- strat.plot(data.diagram.plants.algae[,2:60],yvar = age/1000, y.rev=TRUE,
+                    srt.xlabel=90,
+                    title = "Algae",
+                    cex.title = 1,
+                    cex.axis=0.6,
+                    cex.xlabel = 0.8,
+                    plot.line=FALSE,
+                    ylabel = "Age (ka BP)",
+                    plot.bar=T,
+                    scale.percent=FALSE,
+                    lwd.bar=3,
+                    minmax=matrix(c(0,1), ncol=2, nrow=ncol(data.diagram.plants.algae[,2:60]), byrow=TRUE))
+```
+# 13 Full animal weightrep data diagrams for supplementary material
+Obtain dataframe and diagram
+```{r}
+taxa.group2.animals <- TRAM21.animals %>% select(final_assignment, group_v2)
+TRAM21.animals_weightrep_no_blank_diagram <- TRAM21.animals %>%
+  select(starts_with("weightrep_sample.TRAM_1b_")) %>% #dataframe with all weightrep information except controls
+  mutate(across(everything(), as.numeric))
+TRAM21.animals_weightrep_no_blank_diagram_T <- t(TRAM21.animals_weightrep_no_blank_diagram)    #transpose dataframe
+colnames(TRAM21.animals_weightrep_no_blank_diagram_T) <- taxa_names.animals    #assign species names to columns
+temp_animals_weightrep_age <- cbind(age, TRAM21.animals_weightrep_no_blank_diagram_T)    #dataframe with weightrep information for each taxa
+final_assignment <- colnames(temp_animals_weightrep_age)
+data.diagram.animals <- t(temp_animals_weightrep_age) %>%
+  as.data.frame() %>%
+  mutate("final_assignment" = final_assignment) %>%
+  relocate(final_assignment, .before = "weightrep_sample.TRAM_1b_3U_11.12_rpt") %>%
+  full_join(taxa.group2.animals, by = "final_assignment") %>%
+  relocate(group_v2, .after = "final_assignment") %>%
+  mutate_all(~replace(., is.na(.), "age")) #NA = age as we only have 1 NA in the age
+
+data.diagram.animals.all <- data.diagram.animals %>%
+  arrange(final_assignment) %>%
+  arrange(group_v2 = fct_relevel(group_v2,"age", "Bos taurus", "Ovis aries", "Capra hircus",
+                                 "Wild mammal", "Wild animal", "Other animals")) %>%
+  select(-group_v2) %>%
+  t()
+colnames(data.diagram.animals.all) <- data.diagram.animals.all[1,]
+
+data.diagram.animals.all <- data.diagram.animals.all %>%
+  as.data.frame() %>%
+  slice(-1) %>%
+  mutate_all(as.numeric)
+
+p13 <- strat.plot(data.diagram.animals.all[,2:31],yvar = age/1000, y.rev=TRUE,
+                    srt.xlabel=90,
+                    title = "Animals",
+                    cex.title = 1,
+                    cex.axis=0.6,
+                    cex.xlabel = 0.8,
+                    plot.line=FALSE,
+                    ylabel = "Age (ka BP)",
+                    plot.bar=T,
+                    scale.percent=FALSE,
+                    lwd.bar=3,
+                    minmax=matrix(c(0,1), ncol=2, nrow=ncol(data.diagram.plants.algae[,2:31]), byrow=TRUE))
+```

@@ -18,7 +18,7 @@ if(length(new_packages)) install.packages(new_packages)
 
 lapply(packages, library, character.only = TRUE)
 
-load("E:/Saco/IJP/2_code/tramacastilla_sedaDNA/TRAM.RData") #import data
+load("TRAM.RData") #import data
 ```
 # 1. Tramacastilla ages and depths
 ```{r}

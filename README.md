@@ -5,5 +5,5 @@ This code and dataset belong with the *in prep* paper: **Neolithic pastoralism a
 
 We performed sedimentary ancient DNA (*sed*aDNA) analysis in a Pyrenean lacustrine sequence (Tramacastilla Lake, 1682 m a.s.l.).
 
-File *Tramacastilla_shortcomm.Rmd* includes all the code needed to obtain the results of the paper.
+File *Tramacastilla_shortcomm.Rmd* includes all the code needed to obtain the results of the paper.\
 File *TRAM.RData* includes all data needed to run the code provided.

@@ -916,8 +916,8 @@ Including both RDAs analysed in this code (parts 6 and 8)
 ```{r}
 fig_3 <- p.rda + p.rda1 + plot_layout(ncol = 2)
 ```
-# 11. Tables for supplementary material
-## 11.1 Table 2 supplementary material
+# 11. Tables for supplementary information
+## 11.1 Supplementary Table 2
 ```{r}
 RAI_groups_plants_perc <- as.data.frame(RAI_groups_plants_perc)
 summary(RAI_groups_plants_perc)
@@ -931,7 +931,7 @@ sd(RAI_groups_plants_perc$Shrub)
 sd(RAI_groups_plants_perc$`Other tree`)
 sd(RAI_groups_plants_perc$`Other plant`)
 ```
-## 11.2 Table 3 supplementary material
+## 11.2 Supplementary Table 3
 ```{r}
 RAI_groups_animals_perc <- as.data.frame(RAI_groups_animals_perc)
 summary(RAI_groups_animals_perc)
@@ -942,62 +942,62 @@ sd(RAI_groups_animals_perc$`Wild animal`)
 sd(RAI_groups_animals_perc$`Wild mammal`)
 sd(RAI_groups_animals_perc$`Other animals`)
 ```
-## 11.3 Table 4 supplementary material
+## 11.3 Supplementary Table 4
 ```{r}
 summary(Total.taxa.richness[c(1:25, 27:46)])
 sd(Total.taxa.richness[c(1:25, 27:46)])
 ```
-## 11.4 Table 5 supplementary material
+## 11.4 Supplementary Table 5
 ```{r}
 summary(RDA)
 ```
-## 11.5 Table 6 supplementary material
+## 11.5 Supplementary Table 6
 ```{r}
 RsquareAdj(RDA) #total variance explained by RDA
 ```
-## 11.6 Table 7 supplementary material
+## 11.6 Supplementary Table 7
 ```{r}
 anova.cca(RDA, permutations = 10000) #permutation test to see global RDA significance
 ```
-## 11.7 Table 8 supplementary material
+## 11.7 Supplementary Table 8
 ```{r}
 anova.cca(RDA, permutations = 10000, by = "axis") #permutation test to see axis significance
 ```
-## 11.8 Table 9 supplementary material
+## 11.8 Supplementary Table 9
 ```{r}
 anova.cca(RDA, permutations = 10000, by = "terms") #permutation test to see terms significance
 ```
-## 11.9 Table 10 and Figure 13 supplementary material
+## 11.9 Supplementary Table 10 and Supplementary Figure 13
 ```{r}
 sqrt(vif.cca(RDA))#check for multicollinearity
 languageR::pairscor.fnc(datos.animals) #pairwise correlations
 ```
-## 11.10 Table 11 supplementary material
+## 11.10 Supplementary Table 11
 ```{r}
 summary(RDA.1)
 ```
-## 11.11 Table 12 supplementary material
+## 11.11 Supplementary Table 12
 ```{r}
 RsquareAdj(RDA.1) #total variance explained by RDA: 0.26
 ```
-## 11.12 Table 13 supplementary material
+## 11.12 Supplementary Table 13
 ```{r}
 anova.cca(RDA.1, permutations = 10000) #permutation test to see global RDA significance: significant
 ```
-## 11.13 Table 14 supplementary material
+## 11.13 Supplementary Table 14
 ```{r}
 anova.cca(RDA.1, permutations = 10000, by = "axis") #permutation test to see axis significance: RDA1 significant
 ```
-## 11.14 Table 15 supplementary material
+## 11.14 Supplementary Table 15
 ```{r}
 anova.cca(RDA.1, permutations = 10000, by = "terms") #permutation test to see terms significance: cow significant
 ```
-## 11.15 Table 16 and Figure 14 supplementary material
+## 11.15 Supplementary Table 16 and Supplementary Figure 14
 ```{r}
 sqrt(vif.cca(RDA.1))#check for multicollinearity: no VIF > 1.5 -> no multicollinearity
 languageR::pairscor.fnc(datos.animals.RDA1) #pairwise correlations
 ```
-# 12. Full plant weightrep data diagrams for supplementary material
+# 12. Full plant weightrep data diagrams for supplementary information
 Obtain dataframe
 ```{r}
 taxa.group2.plants <- TRAM21.plants %>% select(scientific_name, group2)
@@ -1215,7 +1215,7 @@ p12.6 <- strat.plot(data.diagram.plants.algae[,2:60],yvar = age/1000, y.rev=TRUE
                     lwd.bar=3,
                     minmax=matrix(c(0,1), ncol=2, nrow=ncol(data.diagram.plants.algae[,2:60]), byrow=TRUE))
 ```
-# 13 Full animal weightrep data diagrams for supplementary material
+# 13 Full animal weightrep data diagrams for supplementary information
 Obtain dataframe and diagram
 ```{r}
 taxa.group2.animals <- TRAM21.animals %>% select(final_assignment, group_v2)

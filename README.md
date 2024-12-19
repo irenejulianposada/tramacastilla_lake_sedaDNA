@@ -1,5 +1,5 @@
 # tramacastilla_lake_sedaDNA
-https://doi.org/10.5281/zenodo.14513521
+https://doi.org/10.5281/zenodo.14530281
 
 This code and dataset belong with the *in prep* paper: **Neolithic pastoralism and plant community interactions at high altitudes of the Pyrenees, Southern Europe** (Julián-Posada *et al*., 2024)
 
